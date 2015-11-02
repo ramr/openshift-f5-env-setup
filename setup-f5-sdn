@@ -1,0 +1,59 @@
+#!/bin/bash
+
+#
+#  Usage:  setup-f5-sdn  <RAMP-NODE-IP>  [ <F5-IP> ]
+#            where:  <RAMP-NODE-IP>  is the IP address of the ramp node.
+#                    <F5-IP>         is the IP address of the internal interface
+#                                    of the F5 router.
+#
+#  Examples:
+#    ./setup-f5-sdn 10.3.89.191
+#        where: 10.3.89.191 is the IP address of the ramp node.
+#
+#    ./setup-f5-sdn 10.3.89.191 10.3.89.235
+#        where:  10.3.89.191 is the IP address of the ramp node.
+#                10.3.89.235 is the IP address of the internal interface of
+#                            the F5 router. You can get this via:
+#                              ip -o -4 addr list internal |  \
+#                                awk '{print $4}' | cut -d/ -f1 | head -n 1
+#
+
+
+#
+#  main():
+#
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <ramp-node-ip-address>"
+  exit 1
+fi
+
+f5_internal_ip=$(ip -o -4 addr list internal | awk '{print $4}' | cut -d/ -f1 | head -n 1)
+
+RAMP_IP="$1"
+F5_IP=${2:-"$f5_internal_ip"}
+TUNNEL_IP1="10.3.91.216"
+CLUSTER_NETWORK="10.1.0.0/16"
+
+echo ""
+echo "  - Deleting route to $CLUSTER_NETWORK ... "
+tmsh delete net route $CLUSTER_NETWORK || true
+
+echo "  - Deleting SDN ip ... "
+tmsh delete net self SDN || true
+
+echo "  - Deleting SDN tunnel ... "
+tmsh delete net tunnels tunnel SDN || true
+
+echo "  - Creating SDN tunnel with local address $F5_IP and remote address $RAMP_IP ... "
+tmsh create net tunnels tunnel SDN \
+    \{ description "OpenShift SDN" local-address \
+    $F5_IP profile ipip remote-address $RAMP_IP \}
+
+echo "  - Assigning SDN ip ${TUNNEL_IP1} ... "
+tmsh create net self SDN \{ address \
+    ${TUNNEL_IP1}/24 allow-service all vlan SDN \}
+
+echo "  - Creating route to $CLUSTER_NETWORK via SDN interface ..."
+tmsh create net route $CLUSTER_NETWORK interface SDN
+
+echo "  - All done. "
