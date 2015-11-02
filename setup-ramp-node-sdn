@@ -1,0 +1,119 @@
+#!/bin/bash
+
+#
+#  Usage:  setup-ramp-node-sdn  <F5-IP>  <sdn-plugin-type>
+#            where:  <F5-IP>            is the IP address of the internal
+#                                       interface of the F5 router.
+#                    <sdn-plugin-type>  is the type of OpenShift SDN
+#                                       plugin. One of sdn|multitenant
+#
+#  Examples:
+#    ./setup-ramp-node-sdn 10.3.89.191 "sdn"
+#        where: 10.3.89.235 is the IP address of the F5 router.
+#
+#    ./setup-ramp-node-sdn 10.3.89.191 "multitenant"
+#        where: 10.3.89.235 is the IP address of the F5 router.
+#
+
+#
+#  main():
+#
+if [ $# -lt 2 ]; then
+  echo "Usage: $0 <f5-internal-ip> <sdn-plugin-type>"
+  echo "  where:  <f5-internal-ip>   is the IP address of the internal"
+  echo "                             interface of the F5 router."
+  echo "          <sdn-plugin-type>  is the type of OpenShift SDN plugin."
+  echo "                             One of sdn|multitenant"
+  exit 1
+fi
+
+F5_IP="$1"
+OSDN_PLUGIN="$2"
+TUNNEL_IP1="10.3.91.216"
+TUNNEL_IP2="10.3.91.217"
+openshift_node_service="origin-node"
+tap1=$(ip -o -4 addr list tun0 | awk '{print $4}' | cut -d/ -f1 | head -n 1)
+
+
+echo ""
+echo "  - Deleting IPIP tunnel on ramp node ... "
+ip tunnel del tun1 || true
+
+echo "  - Creating IPIP tunnel on ramp node to f5 ip address ${F5_IP} ..."
+ip tunnel add tun1 mode ipip remote ${F5_IP} dev eth0
+
+echo "  - Adding local ramp node tunnel IP ${TUNNEL_IP2} ... "
+ip addr add ${TUNNEL_IP2} dev tun1
+
+echo "  - Setting link state to up for tunnel tun1 ... "
+ip link set tun1 up
+
+echo "  - Adding route to F5 end of the tunnel ${TUNNEL_IP1} via tun1 ... "
+ip route add ${TUNNEL_IP1} dev tun1
+
+echo "  - Pinging F5 end of the tunnel ... "
+ping -c 5 ${TUNNEL_IP1}
+
+echo "  - IPIP tunnel setup done."
+
+echo ""
+
+echo "  - Cleaning up OVS rules ... "
+echo "  - Bringing down OpenShift SDN node ${openshift_node_service} ... "
+systemctl stop ${openshift_node_service}
+
+echo "  - Setting link state to lbr0 to down ... "
+ip link set lbr0 down
+
+echo "  - Deleting bridge lbr0 ... "
+brctl delbr lbr0
+
+echo "  - Deleting OVS bridge br0 ... "
+ovs-vsctl del-br br0
+
+echo "  - Restarting OpenShift SDN ... "
+systemctl start ${openshift_node_service}
+
+echo "  - Sleeping 20 secs for node service to come up ..."
+sleep 20
+
+echo "  - Setting up OpenShift SDN for F5+${OSDN_PLUGIN} config ... "
+echo "  - Sourcing env from /etc/openshift-sdn/config.env ... "
+source /etc/openshift-sdn/config.env
+subaddr=$(echo ${OPENSHIFT_SDN_TAP1_ADDR:-"${tap1}"} | cut -d "." -f 1,2,3)
+export RAMP_SDN_IP=${subaddr}.254
+
+echo "  - RAMP_SDN_IP set to ${RAMP_SDN_IP}"
+
+echo "  - Adding IP address ${RAMP_SDN_IP} to tun0 ... "
+ip addr add ${RAMP_SDN_IP} dev tun0
+
+ipflowopts="cookie=0x999,ip"
+arpflowopts="cookie=0x999, table=0, arp"
+
+if [ "${OSDN_PLUGIN}" == "multitenant" ]; then
+  ipflowopts="cookie=0x999,table=1,priority=40000,ip"
+  arpflowopts="cookie=0x999, table=1,priority=40000, arp"
+fi
+
+echo "  - Modifying OVS rules for SNAT ... "
+
+echo "  - Adding OVS flow to map ${TUNNEL_IP1} to ${RAMP_SDN_IP} ... "
+ovs-ofctl -O OpenFlow13 add-flow br0 \
+    "${ipflowopts},nw_src=${TUNNEL_IP1},actions=mod_nw_src:${RAMP_SDN_IP},resubmit(,0)"
+
+echo "  - Adding OVS flow to map ${RAMP_SDN_IP} to ${TUNNEL_IP1} ... "
+ovs-ofctl -O OpenFlow13 add-flow br0 \
+    "${ipflowopts},nw_dst=${RAMP_SDN_IP},actions=mod_nw_dst:${TUNNEL_IP1},resubmit(,0)"
+
+echo "  - Adding OVS flow for arp for ${RAMP_SDN_IP} ... "
+ovs-ofctl -O OpenFlow13 add-flow br0 \
+    "${arpflowopts}, arp_tpa=${RAMP_SDN_IP}, actions=output:2"
+
+if [ "$OSDN_PLUGIN" == "multitenant" ]; then
+  echo "  - Adding OVS flow for tunnel ${TUNNEL_IP1} to output:2 ... "
+  ovs-ofctl -O OpenFlow13 add-flow br0 \
+    "cookie=0x999, table=1,priority=40000,ip,nw_dst=${TUNNEL_IP1},actions=output:2"
+fi
+
+echo "  - All done."
