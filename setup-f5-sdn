@@ -32,7 +32,7 @@ f5_internal_ip=$(ip -o -4 addr list internal | awk '{print $4}' | cut -d/ -f1 | 
 RAMP_IP="$1"
 F5_IP=${2:-"$f5_internal_ip"}
 TUNNEL_IP1="10.3.91.216"
-CLUSTER_NETWORK="10.1.0.0/16"
+CLUSTER_NETWORK="10.128.0.0/14"
 
 echo ""
 echo "  - Deleting route to $CLUSTER_NETWORK ... "
