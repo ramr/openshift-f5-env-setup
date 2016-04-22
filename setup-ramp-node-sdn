@@ -92,11 +92,6 @@ ip addr add ${RAMP_SDN_IP} dev tun0
 ipflowopts="cookie=0x999,ip"
 arpflowopts="cookie=0x999, table=0, arp"
 
-if [ "${OSDN_PLUGIN}" == "multitenant" ]; then
-  ipflowopts="cookie=0x999,table=1,priority=40000,ip"
-  arpflowopts="cookie=0x999, table=1,priority=40000, arp"
-fi
-
 echo "  - Modifying OVS rules for SNAT ... "
 
 echo "  - Adding OVS flow to map ${TUNNEL_IP1} to ${RAMP_SDN_IP} ... "
@@ -123,11 +118,5 @@ echo "  - Adding OVS flow for traffic to tunnel ${TUNNEL_IP1} ... "
 ovs-ofctl -O OpenFlow13 add-flow br0 \
      "${ipflowopts},nw_dst=${TUNNEL_IP1},actions=output:2"
 
-
-if [ "$OSDN_PLUGIN" == "multitenant" ]; then
-  echo "  - Adding OVS flow for tunnel ${TUNNEL_IP1} to output:2 ... "
-  ovs-ofctl -O OpenFlow13 add-flow br0 \
-    "cookie=0x999, table=1,priority=40000,ip,nw_dst=${TUNNEL_IP1},actions=output:2"
-fi
 
 echo "  - All done."
