@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 #
 #  Usage:  setup-ramp-node-sdn  <F5-IP>
 #            where:  <F5-IP>  is the IP address of the internal interface
@@ -70,26 +72,26 @@ function _cleanup_osdn_ovs_rules() {
   local max_retries=${2:-42}
 
   echo "  - Cleaning up OVS rules ... "
-  echo "  - Bringing down OpenShift SDN node ${svc_name} ... "
-  systemctl stop ${svc_name}
+  echo "  - Bringing down OpenShift SDN node ${svcname} ... "
+  systemctl stop ${svcname}
 
   echo "  - Setting link state to lbr0 to down ... "
-  ip link set lbr0 down
+  ip link set lbr0 down ||:
 
   echo "  - Deleting bridge lbr0 ... "
-  brctl delbr lbr0
+  brctl delbr lbr0 ||:
 
   echo "  - Deleting OVS bridge br0 ... "
-  ovs-vsctl del-br br0
+  ovs-vsctl del-br br0 ||:
 
   echo "  - Restarting OpenShift SDN ... "
-  systemctl start ${svc_name}
+  systemctl start ${svcname}
 
   echo "  - Waiting for OpenShift SDN service to start up ..."
   retries=0
-  while ! ovs-ofctl -O OpenFlow13 dump-flows | grep "table=0"; do
+  while ! ovs-ofctl -O OpenFlow13 dump-flows br0 | grep "table=0"; do
     retries=$((retries + 1))
-    if [ $retries -gt ${max_retries} ]; then
+    if [ $retries -ge ${max_retries} ]; then
       echo ""
       echo "ERROR: Max retries $retries exceeded. Exiting ..."
       exit 1
@@ -121,7 +123,7 @@ fi
 F5_TUNNEL_IP=${OPENSHIFT_F5_TUNNEL_IP:-"10.3.91.216"}
 RAMP_TUNNEL_IP=${OPENSHIFT_RAMP_TUNNEL_IP:-"10.3.91.217"}
 CLUSTER_NETWORK=${OPENSHIFT_CLUSTER_NETWORK:-"10.128.0.0/14"}
-OPENSHIFT_NODE_SERVICE=${OPENSHIFT_NODE_SERVICE:-"origin-node"}
+OPENSHIFT_NODE_SERVICE=${OPENSHIFT_NODE_SERVICE:-"openshift-node"}
 MAX_RETRIES=${OPENSHIFT_SDN_MAX_RETRIES:-42}
 SDN_TAP1_ADDR=${OPENSHIFT_SDN_TAP1_ADDR}
 
@@ -131,8 +133,6 @@ _cleanup_osdn_ovs_rules "${OPENSHIFT_NODE_SERVICE}" "${MAX_RETRIES}"
 
 echo ""
 echo "  - Setting up OpenShift SDN for F5 config ... "
-echo "  - Sourcing env from /etc/openshift-sdn/config.env ... "
-source /etc/openshift-sdn/config.env
 tap1=$(ip -o -4 addr list tun0 | awk '{print $4}' | cut -d/ -f1 | head -n 1)
 subaddr=$(echo ${SDN_TAP1_ADDR:-"${tap1}"} | cut -d "." -f 1,2,3)
 export RAMP_SDN_IP=${subaddr}.254
