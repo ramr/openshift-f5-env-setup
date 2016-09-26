@@ -1,87 +1,140 @@
 #!/bin/bash
 
+set -e
+
 #
-#  Usage:  setup-ramp-node-sdn  <F5-IP>  <sdn-plugin-type>
-#            where:  <F5-IP>            is the IP address of the internal
-#                                       interface of the F5 router.
-#                    <sdn-plugin-type>  is the type of OpenShift SDN
-#                                       plugin. One of sdn|multitenant
+#  Usage:  setup-ramp-node-sdn  <F5-IP>
+#            where:  <F5-IP>  is the IP address of the internal interface
+#                             of the F5 router.
 #
 #  Examples:
-#    ./setup-ramp-node-sdn 10.3.89.191 "sdn"
+#    ./setup-ramp-node-sdn 10.3.89.191
 #        where: 10.3.89.235 is the IP address of the F5 router.
 #
-#    ./setup-ramp-node-sdn 10.3.89.191 "multitenant"
+#    ./setup-ramp-node-sdn 10.3.89.191
 #        where: 10.3.89.235 is the IP address of the F5 router.
 #
+
+
+#
+#  Recreate the IP-IP tunnel from the ramp node to the F5.
+#  Usage: _recreate_tunnel_to_f5  <f5-ip> <f5-tunnel-ip> <ramp-tunnel-ip>
+#
+#  Examples:
+#    _recreate_tunnel_to_f5  10.3.89.191 10.3.91.216 10.3.91.217
+#
+function _recreate_tunnel_to_f5() {
+  local f5ip=$1
+  local f5_tunnel_ip=$2
+  local rampnode_tunnel_ip=$3
+  local tun_device=tun1
+
+  echo ""
+  echo "  - Deleting IPIP tunnel on ramp node ... "
+  ip tunnel del ${tun_device} || true
+
+  echo "  - Creating IPIP tunnel on ramp node to f5 ip address ${f5ip} ..."
+  ip tunnel add ${tun_device} mode ipip remote ${f5ip} dev eth0
+
+  echo "  - Adding local ramp node tunnel IP ${rampnode_tunnel_ip} ... "
+  ip addr add ${rampnode_tunnel_ip} dev ${tun_device}
+
+  echo "  - Setting link state to up for tunnel ${tun_device} ... "
+  ip link set ${tun_device} up
+
+  echo "  - Adding route to F5 tunnel ${f5_tunnel_ip} via ${tun_device} ..."
+  ip route add ${f5_tunnel_ip} dev ${tun_device}
+
+  echo "  - Pinging F5 end of the tunnel ... "
+  ping -c 5 ${f5_tunnel_ip}
+
+  if [ $? -ne 0 ]; then
+    echo "ERROR: Unable to ping F5 tunnel IP ${f5_tunnel_ip} - exiting!"
+    exit 1
+  fi
+
+  echo "  - IPIP tunnel setup done."
+  echo ""
+
+}  #  End of function  _recreate_tunnel_to_f5.
+
+
+#
+#  Cleanup OVS rules by restarting the OpenShift SDN service and getting to
+#  a consistent/clean state.
+#  Usage: _cleanup_osdn_ovs_rules  <service-name>  <max-retries>
+#
+#  Examples:
+#    _cleanup_osdn_ovs_rules origin-node 99
+#
+function _cleanup_osdn_ovs_rules() {
+  local svcname=${1:-"origin-node"}
+  local max_retries=${2:-42}
+
+  echo "  - Cleaning up OVS rules ... "
+  echo "  - Bringing down OpenShift SDN node ${svcname} ... "
+  systemctl stop ${svcname}
+
+  echo "  - Setting link state to lbr0 to down ... "
+  ip link set lbr0 down ||:
+
+  echo "  - Deleting bridge lbr0 ... "
+  brctl delbr lbr0 ||:
+
+  echo "  - Deleting OVS bridge br0 ... "
+  ovs-vsctl del-br br0 ||:
+
+  echo "  - Restarting OpenShift SDN ... "
+  systemctl start ${svcname}
+
+  echo "  - Waiting for OpenShift SDN service to start up ..."
+  retries=0
+  while ! ovs-ofctl -O OpenFlow13 dump-flows br0 | grep "table=0"; do
+    retries=$((retries + 1))
+    if [ $retries -ge ${max_retries} ]; then
+      echo ""
+      echo "ERROR: Max retries $retries exceeded. Exiting ..."
+      exit 1
+    else
+      echo -n "."
+      sleep 1
+    fi
+  done
+
+  echo ""
+
+}  #  End of function  _cleanup_osdn_ovs_rules.
+
 
 #
 #  main():
 #
-if [ $# -lt 2 ]; then
-  echo "Usage: $0 <f5-internal-ip> <sdn-plugin-type>"
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <f5-internal-ip>"
   echo "  where:  <f5-internal-ip>   is the IP address of the internal"
   echo "                             interface of the F5 router."
-  echo "          <sdn-plugin-type>  is the type of OpenShift SDN plugin."
-  echo "                             One of sdn|multitenant"
   exit 1
 fi
 
-F5_IP="$1"
-OSDN_PLUGIN="$2"
-TUNNEL_IP1="10.3.91.216"
-TUNNEL_IP2="10.3.91.217"
-CLUSTER_NETWORK="10.128.0.0/14"
-openshift_node_service="origin-node"
+#
+# If your environment settings are customized, you can either set the env
+# variables to the customized values or else edit this script.
+#
+F5_TUNNEL_IP=${OPENSHIFT_F5_TUNNEL_IP:-"10.3.91.216"}
+RAMP_TUNNEL_IP=${OPENSHIFT_RAMP_TUNNEL_IP:-"10.3.91.217"}
+CLUSTER_NETWORK=${OPENSHIFT_CLUSTER_NETWORK:-"10.128.0.0/14"}
+OPENSHIFT_NODE_SERVICE=${OPENSHIFT_NODE_SERVICE:-"openshift-node"}
+MAX_RETRIES=${OPENSHIFT_SDN_MAX_RETRIES:-42}
+SDN_TAP1_ADDR=${OPENSHIFT_SDN_TAP1_ADDR}
+
+_recreate_tunnel_to_f5 "$1" "${F5_TUNNEL_IP}" "${RAMP_TUNNEL_IP}"
+
+_cleanup_osdn_ovs_rules "${OPENSHIFT_NODE_SERVICE}" "${MAX_RETRIES}"
+
+echo ""
+echo "  - Setting up OpenShift SDN for F5 config ... "
 tap1=$(ip -o -4 addr list tun0 | awk '{print $4}' | cut -d/ -f1 | head -n 1)
-
-
-echo ""
-echo "  - Deleting IPIP tunnel on ramp node ... "
-ip tunnel del tun1 || true
-
-echo "  - Creating IPIP tunnel on ramp node to f5 ip address ${F5_IP} ..."
-ip tunnel add tun1 mode ipip remote ${F5_IP} dev eth0
-
-echo "  - Adding local ramp node tunnel IP ${TUNNEL_IP2} ... "
-ip addr add ${TUNNEL_IP2} dev tun1
-
-echo "  - Setting link state to up for tunnel tun1 ... "
-ip link set tun1 up
-
-echo "  - Adding route to F5 end of the tunnel ${TUNNEL_IP1} via tun1 ... "
-ip route add ${TUNNEL_IP1} dev tun1
-
-echo "  - Pinging F5 end of the tunnel ... "
-ping -c 5 ${TUNNEL_IP1}
-
-echo "  - IPIP tunnel setup done."
-
-echo ""
-
-echo "  - Cleaning up OVS rules ... "
-echo "  - Bringing down OpenShift SDN node ${openshift_node_service} ... "
-systemctl stop ${openshift_node_service}
-
-echo "  - Setting link state to lbr0 to down ... "
-ip link set lbr0 down
-
-echo "  - Deleting bridge lbr0 ... "
-brctl delbr lbr0
-
-echo "  - Deleting OVS bridge br0 ... "
-ovs-vsctl del-br br0
-
-echo "  - Restarting OpenShift SDN ... "
-systemctl start ${openshift_node_service}
-
-echo "  - Sleeping 42 secs for node service to come up ..."
-sleep 42
-
-echo "  - Setting up OpenShift SDN for F5+${OSDN_PLUGIN} config ... "
-echo "  - Sourcing env from /etc/openshift-sdn/config.env ... "
-source /etc/openshift-sdn/config.env
-subaddr=$(echo ${OPENSHIFT_SDN_TAP1_ADDR:-"${tap1}"} | cut -d "." -f 1,2,3)
+subaddr=$(echo ${SDN_TAP1_ADDR:-"${tap1}"} | cut -d "." -f 1,2,3)
 export RAMP_SDN_IP=${subaddr}.254
 
 echo "  - RAMP_SDN_IP set to ${RAMP_SDN_IP}"
@@ -94,13 +147,13 @@ arpflowopts="cookie=0x999, table=0, arp"
 
 echo "  - Modifying OVS rules for SNAT ... "
 
-echo "  - Adding OVS flow to map ${TUNNEL_IP1} to ${RAMP_SDN_IP} ... "
+echo "  - Adding OVS flow to map ${F5_TUNNEL_IP} to ${RAMP_SDN_IP} ... "
 ovs-ofctl -O OpenFlow13 add-flow br0 \
-    "${ipflowopts},nw_src=${TUNNEL_IP1},actions=mod_nw_src:${RAMP_SDN_IP},resubmit(,0)"
+    "${ipflowopts},nw_src=${F5_TUNNEL_IP},actions=mod_nw_src:${RAMP_SDN_IP},resubmit(,0)"
 
-echo "  - Adding OVS flow to map ${RAMP_SDN_IP} to ${TUNNEL_IP1} ... "
+echo "  - Adding OVS flow to map ${RAMP_SDN_IP} to ${F5_TUNNEL_IP} ... "
 ovs-ofctl -O OpenFlow13 add-flow br0 \
-    "${ipflowopts},nw_dst=${RAMP_SDN_IP},actions=mod_nw_dst:${TUNNEL_IP1},resubmit(,0)"
+    "${ipflowopts},nw_dst=${RAMP_SDN_IP},actions=mod_nw_dst:${F5_TUNNEL_IP},resubmit(,0)"
 
 echo "  - Adding OVS flow for arp to/from ${RAMP_SDN_IP} ... "
 ovs-ofctl -O OpenFlow13 add-flow br0 \
@@ -114,9 +167,9 @@ echo "  - Adding OVS flow for traffic to ${RAMP_SDN_IP} ... "
 ovs-ofctl -O OpenFlow13 add-flow br0 \
      "ip,table=5,priority=300,nw_dst=${RAMP_SDN_IP},actions=output:2"
 
-echo "  - Adding OVS flow for traffic to tunnel ${TUNNEL_IP1} ... "
+echo "  - Adding OVS flow for traffic to tunnel ${F5_TUNNEL_IP} ... "
 ovs-ofctl -O OpenFlow13 add-flow br0 \
-     "${ipflowopts},nw_dst=${TUNNEL_IP1},actions=output:2"
+     "${ipflowopts},nw_dst=${F5_TUNNEL_IP},actions=output:2"
 
 
 echo "  - All done."
