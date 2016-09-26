@@ -13,8 +13,9 @@ you have designated to be the OpenShift Cluster's ramp node and then just run:
 
 Setup OpenShift Ramp Node:
 --------------------------
-To setup the ramp node as a bridge connecting the OpenShift cluster and the F5 BIGIP host, you need the IP address
-of the F5 node's internal interface and the type of OpenShift SDN plugin configured for your OpenShift cluster.
+To setup the ramp node as a bridge connecting the OpenShift cluster and
+the F5 BIGIP host, you need the IP address of the F5 node's internal
+interface.
 
-    $ sudo ./setup-ramp-node-sdn  <f5-host-internal-ip>  <openshift-sdn-plugin>
-    $ # E.g. sudo ./setup-ramp-node-sdn  10.3.89.235 "multitenant"
+    $ sudo ./setup-ramp-node-sdn  <f5-host-internal-ip>
+    $ # E.g. sudo ./setup-ramp-node-sdn  10.3.89.235
